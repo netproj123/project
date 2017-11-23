@@ -1,0 +1,185 @@
+<!doctype html>
+<html>
+  <head>
+    <title>WebRTC Sample App</title>
+    <script src="/socket.io/socket.io.js"></script>
+  </head>
+
+  <body>
+    <div id='nameSect'>
+      <input id='name' type='text' value='' placeholder='Enter your name'>
+      <button id='nameBtn' type='button'>Set Username</button>
+      <div id='error-container'></div>
+    </div>
+
+    <div id='mesgSect'>
+      <div id='name-container'></div>
+      <input id='mesg' type='text'></input>
+      <button id='mesgBtn' type='button'>Send Message</button>
+      <br><br>
+      <button id='signalBtn' type='button'>Real-time Video/Audio</button>
+      <br>
+      <video id='myVideoTag' autoplay></video>
+      <br>
+      <video id='theirVideoTag' autoplay></video>
+      
+      <p>Message Output:</p>
+      <div id='mesg-container'></div>
+
+      <p>Signaling Output:</p>
+      <div id='signal-container'></div>
+    </div>
+
+    <script>
+      var myname;
+      var socket = io();
+
+      var mesgArea = document.querySelector('#mesg-container');
+      var signalArea = document.querySelector('#signal-container');
+
+      var myVideoArea = document.querySelector('#myVideoTag');
+      var theirVideoArea = document.querySelector('#theirVideoTag');
+
+      document.querySelector('#nameSect').style.display = "block"; // show name section
+      document.querySelector('#mesgSect').style.display = "none";  // hide mesg section
+      document.querySelector('#nameBtn').addEventListener('click', setUsername, false);
+
+      function setUsername() {
+        socket.emit('setUsername', document.querySelector('#name').value);
+      }
+
+      socket.on('userExists', function(data) {
+        document.querySelector('#error-container').innerHTML = data;
+      });
+
+      socket.on('userSet', function(data) {
+        myname = data.username;
+        document.querySelector('#nameSect').style.display = "none";  // hide name section
+        document.querySelector('#mesgSect').style.display = "block"; // show mesg section
+        document.querySelector('#mesgBtn').addEventListener('click', sendMessage, false);
+        document.querySelector('#name-container').innerHTML = 'User: <b>' + data.username + '</b>';
+      });
+
+      function sendMessage() {
+        var msg = document.querySelector('#mesg').value;
+        if (msg) {
+          socket.emit('msg', {user: myname, message: msg});
+          mesg.value = "";
+        }
+      }
+
+      socket.on('newmsg', function(data) {
+        // var mesgArea = document.querySelector('#mesg-container');
+        if (myname) {
+          mesgArea.innerHTML += '<div><b>' + data.user + '</b>: ' + data.message + '</div>'; 
+        }
+      });
+
+      // ----- Signaling starts ---------
+
+      var rtcPeerConn;
+
+      var configuration = {
+        'iceServers': [{'url': 'stun:stun.l.google.com:19302'}]
+      };
+
+      document.querySelector('#signalBtn').addEventListener('click', sendSignal, false);
+
+      function sendSignal() {
+          socket.emit('signal', {'type': 'signalCall', 'message': "RTC Calling"});
+      }
+
+      socket.on('signalMsg', function(data) {
+        // var signalArea = document.querySelector('#signal-container');
+        signalArea.innerHTML += '<div>Signal Received:- ' + data.type + ': ' + data.message + '</div>';
+
+        // Setup the RTC Peer Connection object
+        if (!rtcPeerConn) {
+          startSignaling();
+        }
+
+        if (data.type != 'signalCall') { // data type is not a signal call but an ICE candidate
+          // change the JSON text to object
+          var msgObj = JSON.parse(data.message);
+          if (msgObj.sdp) {
+            rtcPeerConn.setRemoteDescription(new RTCSessionDescription(msgObj.sdp), function() {
+              // if we received an offer, we need to answer
+              if (rtcPeerConn.remoteDescription.type == 'offer') {
+                rtcPeerConn.createAnswer(sendLocalDesc, logError);
+              }
+            }, logError);
+          }
+          else {
+            rtcPeerConn.addIceCandidate(new RTCIceCandidate(msgObj.candidate));
+          }
+        }
+      });
+
+      function startSignaling() {
+        signalArea.innerHTML += '<div>Start Signaling...</div>';
+        rtcPeerConn = new webkitRTCPeerConnection(configuration);
+
+        // Send an ICE candidate to the other peer
+        rtcPeerConn.onicecandidate = function(event) {
+          if (event.candidate) {
+            socket.emit('signal', {
+              'type': 'iceCandidate',
+              'message': JSON.stringify({candidate: event.candidate})
+            });
+          }
+          signalArea.innerHTML += '<div>Completed the ICE Candidate...</div>';
+        };
+
+        // Let the 'negotiationneeded' event trigger offer generation
+        // negotiationneeded is fired after a track is added to a peer connection
+        rtcPeerConn.onnegotiationneeded = function() {
+          signalArea.innerHTML += '<div>onnegotiation called....</div>';
+          rtcPeerConn.createOffer(sendLocalDesc, logError);
+        };
+
+        // Once remote stream arrives, show it in the remote video element
+          /*
+        rtcPeerConn.ontrack = function(event) {
+          signalArea.innerHTML += '<div>Going to add their stream...</div>';
+          theirVideoArea.src = URL.createObjectURL(event.stream[0]);
+        };
+        */
+        rtcPeerConn.onaddstream = function(event) {
+          signalArea.innerHTML = '<div>Going to add their stream...</div>';
+          theirVideoArea.src = URL.createObjectURL(event.stream);
+        }
+
+        // Get a local stream, show it in our video tag and add it to be sent
+        navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia ||
+                                 navigator.mozGetUserMedia;
+        navigator.getUserMedia({audio: true, video: true}, function(stream) {
+          signalArea.innerHTML += '<div>Going to display my stream...</div>';
+          myVideoArea.src = URL.createObjectURL(stream);
+
+          // Previously stream.getTrack;
+          /*
+          stream.getTracks().forEach(function(track) {
+            rtcPeerConn.addTrack(track, stream);
+          });
+          */
+          rtcPeerConn.addStream(stream);
+        }, logError);
+      }
+
+      function sendLocalDesc(desc) {
+        rtcPeerConn.setLocalDescription(desc, function() {
+          signalArea.innerHTML += '<div>Sending local description...</div>';
+          socket.emit('signal', {
+            type: 'SDP',
+            message: JSON.stringify({sdp: rtcPeerConn.localDescription})
+          });
+        }, logError);
+      }
+
+      function logError(error) {
+        signalArea.innerHTML += '<div>Error:- ' + error.name + ': ' + error.message + '</div>';
+      }
+
+    </script>
+  </body>
+</html>
